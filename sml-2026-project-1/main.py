@@ -1,66 +1,108 @@
-from utils import load_config, load_dataset, load_test_dataset, print_results, save_results
+from utils import load_config, load_dataset, load_test_dataset, save_results
+
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV
+import time
+
+from sklearn.model_selection import KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.pipeline import Pipeline
-
-# SVRs are not allowed in this project.
 
 if __name__ == "__main__":
-    # Load configs from "config.yaml"
-    config = load_config()
 
-    # Load dataset: images and corresponding minimum distance values
+    start_time = time.time()
+
+    config = load_config()
     images, distances = load_dataset(config)
+
     print(f"[INFO]: Dataset loaded with {len(images)} samples.")
 
-    # ─────────────────────────────────────────
-    # 1. TRAIN / VALIDATION SPLIT  (80% / 20%)
-    # ─────────────────────────────────────────
-    X_train, X_val, y_train, y_val = train_test_split(
-        images, distances,
-        test_size=0.20,
+    # -------------------------
+    # Grid stays unchanged
+    # -------------------------
+    pca_variance = [0.90, 0.92, 0.94, 0.96, 0.98]
+    n_neighbors_list = [1, 3, 5, 7, 9, 11, 15]
+
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    best_mae = float("inf")
+    best_params = None
+
+    # -------------------------
+    # Pre-scale ONCE
+    # -------------------------
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(images)
+
+    print("\n[INFO] Running optimized hyperparameter search...")
+
+    for pca_var in pca_variance:
+
+        # -------------------------
+        # PCA ONCE per setting
+        # -------------------------
+        pca = PCA(n_components=pca_var, svd_solver="full", random_state=42)
+        X_transformed = pca.fit_transform(X_scaled)
+
+        for n_neighbors in n_neighbors_list:
+
+            model = KNeighborsRegressor(
+                n_neighbors=n_neighbors,
+                weights="distance",
+                metric="euclidean"
+            )
+
+            cv_scores = cross_val_score(
+                model,
+                X_transformed,
+                distances,
+                cv=kf,
+                scoring="neg_mean_absolute_error",
+                n_jobs=-1
+            )
+
+            cv_mae = -cv_scores.mean()
+
+            if cv_mae < best_mae:
+                best_mae = cv_mae
+                best_params = {
+                    "pca": pca_var,
+                    "n_neighbors": n_neighbors
+                }
+
+    print(f"\n[BEST CV MAE]: {best_mae:.4f}")
+
+    # -------------------------
+    # Final model
+    # -------------------------
+    final_scaler = StandardScaler()
+    X_scaled = final_scaler.fit_transform(images)
+
+    final_pca = PCA(
+        n_components=best_params["pca"],
+        svd_solver="full",
         random_state=42
     )
-    print(f"[INFO]: Train: {len(X_train)} | Val: {len(X_val)}")
+    X_final = final_pca.fit_transform(X_scaled)
 
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("pca", PCA(random_state=42)),
-        ("knn", KNeighborsRegressor()),
-    ])
-
-    param_grid = {
-        "pca__n_components": [0.90, 0.95],
-        "knn__n_neighbors": [3, 5, 7],
-        "knn__weights": ["uniform", "distance"],
-        "knn__metric": ["euclidean", "manhattan"],
-    }
-
-    grid_search = GridSearchCV(
-        estimator=pipeline,
-        param_grid=param_grid,
-        scoring="neg_mean_absolute_error",
-        cv=3,
-        n_jobs=-1,
-        verbose=1,
+    final_model = KNeighborsRegressor(
+        n_neighbors=best_params["n_neighbors"],
+        weights="distance",
+        metric="euclidean"
     )
 
-    print("[INFO]: Starte GridSearchCV...")
-    grid_search.fit(X_train, y_train)
+    final_model.fit(X_final, distances)
 
-    best_model = grid_search.best_estimator_
-    best_mae = -grid_search.best_score_
-    print(f"[INFO]: Beste Parameter: {grid_search.best_params_}")
-    print(f"[INFO]: Beste GridSearch MAE (CV): {round(best_mae, 3)}")
-
-    val_pred = best_model.predict(X_val)
-    print_results(y_val, val_pred, label="Validation")
-
+    # -------------------------
+    # Test
+    # -------------------------
     test_images = load_test_dataset(config)
-    test_pred = best_model.predict(test_images)
+    test_scaled = final_scaler.transform(test_images)
+    test_pca = final_pca.transform(test_scaled)
+
+    test_pred = final_model.predict(test_pca)
 
     save_results(test_pred)
-    print("[INFO]: Vorhersagen gespeichert in predictions.csv")
+
+    end_time = time.time()
+    print(f"[INFO] Total runtime: {end_time - start_time:.2f} seconds")
