@@ -1,5 +1,6 @@
 data_dir: ./data
 
 # Set the configs of data loading.
+load_rgb: false
 color_space: HSV
 downsample_factor: 5
